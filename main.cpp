@@ -9,7 +9,9 @@
 #include <stack>
 #include <unordered_set>
 #include <unordered_map>
+#include <algorithm>
 #include <map>
+#include <cmath>
 using namespace std;
 
 typedef unordered_set<int> NodeSet;
@@ -33,17 +35,24 @@ class Node
     std::vector<Point> dataArr;
     NodeOrderSet childset;
     NodeSet childindexset;
-    long id, parent;
+    long id;
+	int parent;
     bool hasData;
+	int pointNum;
+    bool isleaf;
+	unsigned int level;
+	double x1, x2, y1, y2, z1, z2;
+
+    vector<vector<pair<double, long> > > neighbour;
 
     inline void _insert(const Point &data_in){ dataArr.push_back(data_in); }
 
     friend class Knn;
 
     public:
-    Node(long id_in):id(id_in), hasData(false){ }
+    Node(long id_in):id(id_in), hasData(false), isleaf(false), pointNum(0){ }
 
-    Node(const Point &data_in, int id_in):id(id_in),parent(-1), hasData(true){ dataArr.push_back(data_in); }
+    Node(const Point &data_in, int id_in):id(id_in),parent(-1), hasData(true), isleaf(false), pointNum(0){ dataArr.push_back(data_in); }
 
 
     ~Node(){ }
@@ -75,6 +84,13 @@ class Knn {
     unordered_map<long, int> nodeTable;
     unsigned int maxlevel;
     unsigned int ndim;
+    int K;
+    NodeSet MyGenerate(const Node &);
+    void MyCombine(Node &, const Node &);
+    double large_dist_compute(const Node&, const Node&);
+    double small_dist_compute(const Node&, const Node&);
+    double dist_compute(double, double, double, double, double, double);
+	void coordinate(Node&);
     long _computeKey(unsigned int , unsigned int , unsigned int );
     long _getCellId(const Point &);
     void _flush_buffer();
@@ -83,7 +99,8 @@ class Knn {
     string getLinearTree() const;
     string getLocalTree() const;
     public:
-    Knn(){};
+    Knn(): K(3){};
+	void Compute();
     void load(string);
     void build(){
         _flush_buffer();
@@ -93,7 +110,243 @@ class Knn {
         cout << getLinearTree() <<endl;
         cout << getLocalTree() <<endl;
     };
+
+
 };
+
+
+
+void Knn::Compute(){
+    for(int i = 0; i < localStruct.size(); i++){
+		//cout<<"Compute "<<i<<" "<<localStruct[i].dataArr.size()<<endl;
+        if(localStruct[i].isleaf){
+			auto mynode = localStruct[i];
+            auto set = MyGenerate(mynode);
+			
+			//cout<<"leaf "<<endl;            
+			//cout<<"generate end"<<endl;
+			//cout<<"nn size "<<mynode.neighbour.size()<<endl;
+
+			mynode.neighbour.resize(mynode.dataArr.size());
+            for(auto node_id : set){
+				if(node_id != mynode.getId()){
+					auto node = localStruct[nodeTable[node_id]];
+                	MyCombine(mynode, node);
+				}
+            }
+			//cout<<"nn size 2 "<<mynode.neighbour.size()<<endl;
+            for(int j = 0; j < mynode.neighbour.size(); j++){
+                auto &nn = mynode.neighbour[j];
+   			    sort(nn.begin(), nn.end());
+                nn.resize(K);
+
+				cout<< "*********"<<endl;
+				cout<<"node id "<<mynode.getId()<<endl;
+				cout<<nn[0].first<<" "<<nn[0].second<<" "<<nn[1].first<<" "<<nn[1].second<<" "<<nn[2].first<<" "<<nn[2].second<<endl;
+				cout<<endl;
+			}
+        }
+    }
+}
+
+
+NodeSet Knn::MyGenerate(const Node& mynode){
+    NodeSet myset;
+    
+    Node cur = mynode;
+    long id = cur.getId();
+    int parent;
+    multiset<double> large_dist_set;
+    double large_dist;
+    double small_dist;
+
+	//cout<<"in generate"<<endl;
+
+	stack<Node> st;
+
+	//cout<<"======"<<endl;
+	//cout<<id<<endl;
+	//cout<<endl;
+
+    while(id != 1){
+		st.push(cur);
+        parent = cur.getParent();
+        cur = localStruct[parent];
+        id = cur.getId();
+		//cout<<id<<endl;
+    }
+
+    deque<Node> Q;
+    deque<Node> New; 
+    Q.push_back(cur);
+
+	//cout<<"looking for knn"<<endl;
+
+    do{
+		//cout<<"do while"<<Q.size()<<" cur id "<<cur.getId()<<endl;
+        //Find the largest dist
+        for(int i = 0; i < Q.size(); i++){
+            large_dist_set.insert(large_dist_compute(cur, Q[i]));
+        }
+        if(Q.size() < K+1){
+            for(auto &&node : Q){
+				if(node.isleaf){
+					New.push_back(node);
+				}
+				else{
+                	for(auto &&ch : node.childset){
+                    	New.push_back(localStruct[ch.second]);
+                	}
+				}
+            }
+        }
+		else{
+        	multiset<double>::iterator i = large_dist_set.begin();
+        	for(int j = 0; j < K+1; j++) i++;
+        	large_dist = *i;
+
+        	//Find the cube to be tested in next level
+        	for(auto &node : Q){
+            	if(small_dist_compute(cur, node) < large_dist){
+					if(node.isleaf){
+						New.push_back(node);
+					}
+					else{
+                		for(auto &&ch_index : node.childset){
+                    		auto child = localStruct[ch_index.second];
+                    		//if(small_dist_compute(cur, child) < large_dist){
+                        		New.push_back(child);
+                    		//}
+                		}
+					}
+            	}
+        	}
+		}
+        Q.clear();
+        Q = New;
+        New.clear();
+
+		cur = st.top();
+		st.pop();		
+
+    }while(!cur.isleaf);
+
+	//cout <<"find knn"<<endl;
+
+    for(auto&& node : Q){
+        myset.insert(node.getId());
+    }
+    return myset;
+}
+
+
+double Knn::large_dist_compute(const Node& a, const Node& b){
+	double ax = 0.0, ay = 0.0, az = 0.0, bx = 0.0, by = 0.0, bz = 0.0;
+	if(fabs(a.x1 - b.x2) > fabs(a.x2 - b.x1)){
+		ax = a.x1;
+		bx = b.x2;
+	}
+	else{
+		ax = a.x2;
+		bx = b.x1;
+	}
+	if(fabs(a.y1 - b.y2) > fabs(a.y2 - b.y1)){
+		ay = a.y1;
+		by = b.y2;
+	}
+	else{
+		ay = a.y2;
+		by = b.y1;
+	}
+	if(fabs(a.z1 - b.z2) > fabs(a.z2 - b.z1)){
+		az = a.z1;
+		bz = b.z2;
+	}
+	else{
+		az = a.z2;
+		bz = b.z1;
+	}
+
+    return dist_compute(ax, ay, az, bx, by, bz);
+}
+
+double Knn::small_dist_compute(const Node& a, const Node& b){
+	double ax = 0.0, ay = 0.0, az = 0.0, bx = 0.0, by = 0.0, bz = 0.0;
+	if(fabs(a.x1 - b.x2) < fabs(a.x2 - b.x1)){
+		ax = a.x1;
+		bx = b.x2;
+	}
+	else{
+		ax = a.x2;
+		bx = b.x1;
+	}
+	if(fabs(a.y1 - b.y2) < fabs(a.y2 - b.y1)){
+		ay = a.y1;
+		by = b.y2;
+	}
+	else{
+		ay = a.y2;
+		by = b.y1;
+	}
+	if(fabs(a.z1 - b.z2) < fabs(a.z2 - b.z1)){
+		az = a.z1;
+		bz = b.z2;
+	}
+	else{
+		az = a.z2;
+		bz = b.z1;
+	}
+
+
+    return dist_compute(ax, ay, az, bx, by, bz);
+}
+
+void Knn::MyCombine(Node& a,  const Node& b){
+	//cout<<"begin combine "<<a.dataArr.size() << " "<<b.dataArr.size()<<endl;
+    for(int i = 0; i < a.dataArr.size(); i++){
+        auto p = a.dataArr[i];
+		auto &tmp = a.neighbour[i];
+        for(int j = 0; j < b.dataArr.size(); j++){
+			auto p2 = b.dataArr[j];
+            tmp.push_back(make_pair(dist_compute(p.x, p.y, p.z, p2.x, p2.y, p2.z), p2.id));
+        }
+    }
+	//cout<<"combine end "<<a.neighbour.size()<<endl;
+}
+
+void Knn::coordinate(Node& a){
+	auto id = a.getId();
+	int mask = 1;
+	int x = 0;
+	int y = 0;
+	int z = 0;
+
+	for(unsigned int i = 0; i < a.level; i++){
+		x << 1;
+		y << 1;
+		z << 1;
+		if(id & mask) z += 1;
+		id >> 1;
+		if(id & mask) y += 1;
+		id >> 1;
+		if(id & mask) x += 1;
+	}
+
+	double len = 1.0 / (1 << (a.level));
+	a.x1 = x * len;
+	a.y1 = y * len;
+	a.z1 = z * len;
+	a.x2 = a.x1 + len;
+	a.y2 = a.y1 + len;
+	a.z2 = a.z1 + len;
+
+	
+}
+
+double Knn::dist_compute(double x1, double y1, double z1, double x2, double y2, double z2){
+	double dist = sqrt(pow((x1 - x2), 2) + pow((y1 - y2), 2) + pow((z1 - z2), 2));
+	return dist;
+}
 
 void Knn::load(string filename){
     std::ifstream fs(filename.c_str());
@@ -180,9 +433,22 @@ void Knn::_flush_buffer() {
         long cellId = it.id;
         auto itt = nodeTable.find(cellId);
         if (itt == nodeTable.end()){
-            localArr.push_back(Node(cellId)); 
+            Node new_node(cellId);
+            new_node.isleaf = true;
+			new_node.dataArr.push_back(it);
+			new_node.hasData = true;
+			new_node.pointNum = 1;
+			new_node.level = maxlevel - 1;
+			coordinate(new_node);
+            localArr.push_back(new_node); 
             nodeTable[cellId] = localArr.size() - 1;
         }
+		else{
+			auto &this_node = localArr[itt->second];
+			this_node.dataArr.push_back(it);
+			this_node.hasData = true;
+			this_node.pointNum++;
+		}
     }
     cout << "DEBUG " << ":  " << "localArr size: " << localArr.size() <<endl;
     cout << "DEBUG " << ":  " << "nodeTable size: " << nodeTable.size() <<endl;
@@ -260,7 +526,7 @@ string Knn::getLinearTree() const {
             }
         }
         if(result.back() == ',') result.pop_back();
-        result += "];";
+        result += "];\n";
     }
     if(!result.empty()) result.pop_back();
     return result;
@@ -281,7 +547,11 @@ void Knn::_assemble() {
             localArr.push_back(Node(it));
             for(int i = 0; i < localArr.size()-1; i++){
                 if((localArr[i].id) >> 3 == it){
-                    localArr.back().childset.insert(make_pair(localArr[i].id, i));
+					auto &this_node = localArr.back();
+                    this_node.childset.insert(make_pair(localArr[i].id, i));
+					this_node.pointNum += localArr[i].pointNum;
+					this_node.level = localArr[i].level - 1;
+					coordinate(this_node);
                     localArr[i].parent = localArr.size()-1;
                 }
             }
@@ -302,11 +572,18 @@ void Knn::_assemble() {
     _post_order_walk();
 }
 
+
+
+
+
 int main(int argc, char** argv)
 {
     Knn knn;
     knn.load(string(argv[1]));
     knn.build();
     knn.print();
+	cout<<"compute begin"<<endl;
+	knn.Compute();
+	cout<<"compute end"<<endl;
     return 0;
 }
